@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import List, Tuple
+import random
+from typing import List, Sequence, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -9,6 +10,7 @@ from mmengine.model import BaseModule
 
 from mmdet.models.layers.transformer.detr_layers import DetrTransformerEncoder
 from mmdet.registry import MODELS
+from mmdet.structures.bbox import bbox_cxcywh_to_xyxy, bbox_xyxy_to_cxcywh
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 
 from .dino_layers import DinoTransformerDecoder
@@ -372,3 +374,201 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
                 intermediate_reference_points)
 
         return query, reference_points
+
+
+def register_stash_grad_hook(v: Tensor) -> Tensor:
+    leaf = v.detach().requires_grad_(True)
+    def recover_stashed_grad_from_leaf(grad):
+        return grad if leaf.grad is None else grad + leaf.grad
+    v.register_hook(recover_stashed_grad_from_leaf)
+    return leaf
+
+
+class DeqRTDETRTransformerDecoder(RTDETRTransformerDecoder):
+    """Transformer decoder of Deep Equilibrium RT-DETR."""
+
+    def __init__(self,
+                 *args,
+                 num_layers: int,
+                 refinement_steps: int,
+                 supervision_position: Sequence[int],
+                 grad_accumulation: bool = False,
+                 perturb_query_prob: float = 0.2,
+                 perturb_query_intensity: float = 0.1,
+                 perturb_ref_points_prob: float = 0.2,
+                 perturb_ref_points_intensity: float = 0.02,
+                 extra_supervisions_on_init_head: int = 2,
+                 rag: int = 2,
+                 return_intermediate: bool = True,
+                 **kwargs) -> None:
+        assert num_layers == 2
+        assert return_intermediate
+        assert supervision_position[-1] == refinement_steps
+        self.refinement_steps = refinement_steps
+        self.supervision_position = supervision_position
+        self.grad_accumulation = grad_accumulation
+        self.perturb_query_prob = perturb_query_prob
+        self.perturb_query_intensity = perturb_query_intensity
+        self.perturb_ref_points_prob = perturb_ref_points_prob
+        self.perturb_ref_points_intensity = perturb_ref_points_intensity
+        self.extra_supervisions_on_init_head = extra_supervisions_on_init_head
+        self.rag = rag
+        super().__init__(num_layers, *args,
+                         return_intermediate=return_intermediate, **kwargs)
+
+    def forward(self, query: Tensor, value: Tensor, key_padding_mask: Tensor,
+                self_attn_mask: Tensor, reference_points: Tensor,
+                spatial_shapes: Tensor, level_start_index: Tensor,
+                valid_ratios: Tensor, reg_branches: nn.ModuleList,
+                **kwargs) -> Tuple[List[Tensor]]:
+        """Forward function of Transformer decoder.
+
+        Args:
+            query (Tensor): The input query, has shape (num_queries, bs, dim).
+            value (Tensor): The input values, has shape (num_value, bs, dim).
+            key_padding_mask (Tensor): The `key_padding_mask` of `self_attn`
+                input. ByteTensor, has shape (num_queries, bs).
+            self_attn_mask (Tensor): The attention mask to prevent information
+                leakage from different denoising groups and matching parts, has
+                shape (num_queries_total, num_queries_total). It is `None` when
+                `self.training` is `False`.
+            reference_points (Tensor): The initial reference, has shape
+                (bs, num_queries, 4) with the last dimension arranged as
+                (cx, cy, w, h).
+            spatial_shapes (Tensor): Spatial shapes of features in all levels,
+                has shape (num_levels, 2), last dimension represents (h, w).
+            level_start_index (Tensor): The start index of each level.
+                A tensor has shape (num_levels, ) and can be represented
+                as [0, h_0*w_0, h_0*w_0+h_1*w_1, ...].
+            valid_ratios (Tensor): The ratios of the valid width and the valid
+                height relative to the width and the height of features in all
+                levels, has shape (bs, num_levels, 2).
+            reg_branches: (obj:`nn.ModuleList`): Used for refining the
+                regression results.
+
+        Returns:
+            tuple[Tensor]: Output queries and references of Transformer
+                decoder
+
+            - query (Tensor): Output embeddings of the last decoder, has
+              shape (num_queries, bs, embed_dims) when `return_intermediate`
+              is `False`. Otherwise, Intermediate output embeddings of all
+              decoder layers, has shape (num_decoder_layers, num_queries, bs,
+              embed_dims).
+            - reference_points (Tensor): The reference of the last decoder
+              layer, has shape (bs, num_queries, 4)  when `return_intermediate`
+              is `False`. Otherwise, Intermediate references of all decoder
+              layers, has shape (num_decoder_layers, bs, num_queries, 4). The
+              coordinates are arranged as (cx, cy, w, h)
+        """
+        if not self.training:
+            return self.predict(query, value, key_padding_mask, self_attn_mask,
+                                reference_points, spatial_shapes,
+                                level_start_index, valid_ratios, reg_branches,
+                                **kwargs)
+
+        intermediate = []
+        intermediate_reference_points = []
+
+        query, new_reference_points = self.forward_layer(
+            0, query, value, key_padding_mask, self_attn_mask,
+            reference_points, spatial_shapes, level_start_index,
+            valid_ratios, reg_branches, **kwargs)
+        reference_points = new_reference_points.detach()
+        intermediate.append(query)
+        intermediate_reference_points.append(new_reference_points)
+
+        sup_query, sup_reference_points = query, reference_points
+        for _ in range(self.extra_supervisions_on_init_head):
+            sup_query, sup_new_reference_points = self.forward_layer(
+                1, sup_query, value, key_padding_mask, self_attn_mask,
+                sup_reference_points, spatial_shapes, level_start_index,
+                valid_ratios, reg_branches, **kwargs)
+            sup_reference_points = sup_new_reference_points.detach()
+            intermediate.append(sup_query)
+            intermediate_reference_points.append(sup_new_reference_points)
+
+        if self.grad_accumulation:
+            value = register_stash_grad_hook(value)
+
+        query = query.detach()
+        for i in range(1, self.refinement_steps + 1):
+            with torch.no_grad():
+                if random.random() < self.perturb_query_prob:
+                    noise = torch.randn_like(query)
+                    query = (1 - self.perturb_query_intensity) * query \
+                          + self.perturb_query_intensity * noise * torch.norm(
+                              query, dim=-1, keepdim=True)
+                if random.random() < self.perturb_ref_points_prob:
+                    noise = torch.randn_like(reference_points)
+                    tmp = bbox_cxcywh_to_xyxy(reference_points) \
+                        + noise * self.perturb_ref_points_intensity
+                    reference_points = bbox_xyxy_to_cxcywh(tmp)
+                query, new_reference_points = self.forward_layer(
+                    1, query, value, key_padding_mask, self_attn_mask,
+                    reference_points, spatial_shapes, level_start_index,
+                    valid_ratios, reg_branches, **kwargs)
+                reference_points = new_reference_points.detach()
+
+            if i in self.supervision_position:
+                sup_query, sup_reference_points = query, reference_points
+                for _ in range(self.rag):
+                    sup_query, sup_new_reference_points = self.forward_layer(
+                        1, sup_query, value, key_padding_mask, self_attn_mask,
+                        sup_reference_points, spatial_shapes,
+                        level_start_index, valid_ratios, reg_branches,
+                        **kwargs)
+                    sup_reference_points = sup_new_reference_points.detach()
+                intermediate.append(sup_query)
+                intermediate_reference_points.append(sup_new_reference_points)
+
+        return intermediate, intermediate_reference_points
+
+    def predict(self, query: Tensor, value: Tensor,
+                key_padding_mask: Tensor, self_attn_mask: Tensor,
+                reference_points: Tensor, spatial_shapes: Tensor,
+                level_start_index: Tensor, valid_ratios: Tensor,
+                reg_branches: nn.ModuleList, **kwargs) -> Tuple[List[Tensor]]:
+        query, new_reference_points = self.forward_layer(
+            0, query, value, key_padding_mask, self_attn_mask,
+            reference_points, spatial_shapes, level_start_index,
+            valid_ratios, reg_branches, **kwargs)
+        reference_points = new_reference_points.detach()
+
+        for i in range(1, self.refinement_steps + 1):
+            query, new_reference_points = self.forward_layer(
+                1, query, value, key_padding_mask, self_attn_mask,
+                reference_points, spatial_shapes, level_start_index,
+                valid_ratios, reg_branches, **kwargs)
+            reference_points = new_reference_points.detach()
+
+        return [query], [new_reference_points]
+
+    def forward_layer(self, layer_idx: int, query: Tensor, value: Tensor,
+                      key_padding_mask: Tensor, self_attn_mask: Tensor,
+                      reference_points: Tensor, spatial_shapes: Tensor,
+                      level_start_index: Tensor, valid_ratios: Tensor,
+                      reg_branches: nn.ModuleList, **kwargs) -> Tuple[Tensor]:
+        reference_points_input = reference_points[:, :, None]
+        query_pos = self.ref_point_head(reference_points)
+
+        query = self.layers[layer_idx](
+            query,
+            query_pos=query_pos,
+            value=value,
+            key_padding_mask=key_padding_mask,
+            self_attn_mask=self_attn_mask,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios,
+            reference_points=reference_points_input,
+            **kwargs)
+
+        if reg_branches is not None:
+            tmp = reg_branches[layer_idx](query)
+            assert reference_points.shape[-1] == 4
+            new_reference_points = tmp + inverse_sigmoid(
+                reference_points, eps=1e-3)
+            new_reference_points = new_reference_points.sigmoid()
+
+        return query, new_reference_points

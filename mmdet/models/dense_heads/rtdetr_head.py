@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 
 import torch
 from torch import Tensor
+from torch.cuda.amp import autocast
 
 from mmdet.registry import MODELS
 from mmdet.structures.bbox import bbox_cxcywh_to_xyxy, bbox_overlaps
@@ -87,23 +88,25 @@ class RTDETRHead(DINOHead):
         cls_avg_factor = max(cls_avg_factor, 1)
 
         if len(cls_scores) > 0:
-            if isinstance(self.loss_cls, RTDETRVarifocalLoss):
-                cls_iou_targets = torch.zeros_like(cls_scores)
-                pos_inds = labels != self.num_classes
-                pos_labels = labels[pos_inds]
-                if len(pos_labels) > 0:
-                    iou_score = bbox_overlaps(
-                        bboxes.detach(), bboxes_gt, is_aligned=True)
-                    cls_iou_targets[pos_inds, pos_labels] = \
-                        iou_score[pos_inds].type_as(cls_iou_targets)  # for amp
-                loss_cls = self.loss_cls(
-                    cls_scores, cls_iou_targets, avg_factor=cls_avg_factor)
-            else:
-                loss_cls = self.loss_cls(
-                    cls_scores,
-                    labels,
-                    label_weights,
-                    avg_factor=cls_avg_factor)
+            cls_scores = cls_scores.type_as(bboxes_gt)
+            with autocast(enabled=False):
+                if isinstance(self.loss_cls, RTDETRVarifocalLoss):
+                    cls_iou_targets = torch.zeros_like(cls_scores)
+                    pos_inds = labels != self.num_classes
+                    pos_labels = labels[pos_inds]
+                    if len(pos_labels) > 0:
+                        iou_score = bbox_overlaps(
+                            bboxes.detach(), bboxes_gt, is_aligned=True)
+                        cls_iou_targets[pos_inds, pos_labels] = \
+                            iou_score[pos_inds]
+                    loss_cls = self.loss_cls(
+                        cls_scores, cls_iou_targets, avg_factor=cls_avg_factor)
+                else:
+                    loss_cls = self.loss_cls(
+                        cls_scores,
+                        labels,
+                        label_weights,
+                        avg_factor=cls_avg_factor)
         else:
             loss_cls = torch.zeros(
                 1, dtype=cls_scores.dtype, device=cls_scores.device)
@@ -183,20 +186,24 @@ class RTDETRHead(DINOHead):
                 cls_scores.new_tensor([cls_avg_factor]))
         cls_avg_factor = max(cls_avg_factor, 1)
 
-        if isinstance(self.loss_cls, RTDETRVarifocalLoss):
-            cls_iou_targets = torch.zeros_like(cls_scores)
-            pos_inds = labels != self.num_classes
-            pos_labels = labels[pos_inds]
-            if len(pos_labels) > 0:
-                iou_score = bbox_overlaps(
-                    bboxes.detach(), bboxes_gt, is_aligned=True)
-                cls_iou_targets[pos_inds, pos_labels] = \
-                    iou_score[pos_inds].type_as(cls_iou_targets)  # for amp
-            loss_cls = self.loss_cls(
-                cls_scores, cls_iou_targets, avg_factor=cls_avg_factor)
-        else:
-            loss_cls = self.loss_cls(
-                cls_scores, labels, label_weights, avg_factor=cls_avg_factor)
+        cls_scores = cls_scores.type_as(bboxes_gt)
+        with autocast(enabled=False):
+            if isinstance(self.loss_cls, RTDETRVarifocalLoss):
+                cls_iou_targets = torch.zeros_like(cls_scores)
+                pos_inds = labels != self.num_classes
+                pos_labels = labels[pos_inds]
+                if len(pos_labels) > 0:
+                    iou_score = bbox_overlaps(
+                        bboxes.detach(), bboxes_gt, is_aligned=True)
+                    cls_iou_targets[pos_inds, pos_labels] = iou_score[pos_inds]
+                loss_cls = self.loss_cls(
+                    cls_scores, cls_iou_targets, avg_factor=cls_avg_factor)
+            else:
+                loss_cls = self.loss_cls(
+                    cls_scores,
+                    labels,
+                    label_weights,
+                    avg_factor=cls_avg_factor)
 
         # Compute the average number of gt boxes across all gpus, for
         # normalization purposes

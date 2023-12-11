@@ -396,7 +396,7 @@ class DeqRTDETRTransformerDecoder(RTDETRTransformerDecoder):
                  perturb_query_prob: float = 0.2,
                  perturb_query_intensity: float = 0.1,
                  perturb_ref_points_prob: float = 0.2,
-                 perturb_ref_points_intensity: float = 0.02,
+                 perturb_ref_points_intensity: float = 1 / 32,
                  extra_supervisions_on_init_head: int = 2,
                  rag: int = 2,
                  return_intermediate: bool = True,

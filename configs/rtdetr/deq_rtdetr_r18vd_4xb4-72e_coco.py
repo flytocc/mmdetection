@@ -11,6 +11,6 @@ model = dict(
         perturb_query_intensity=0.1,
         perturb_ref_points_prob=0.2,
         perturb_ref_points_intensity=1 / 32,
-        extra_supervisions_on_init_head=1,
-        rag=1),
+        extra_supervisions_on_init_head=2,
+        rag=2),
     bbox_head=dict(type='DeepEquilibriumRTDETRHead'))

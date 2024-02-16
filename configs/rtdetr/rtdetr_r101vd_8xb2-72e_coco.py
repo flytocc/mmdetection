@@ -7,6 +7,7 @@ model = dict(
     neck=dict(out_channels=384),
     encoder=dict(
         in_channels=[384, 384, 384],
+        fpn_cfg=dict(in_channels=[384, 384, 384]),
         layer_cfg=dict(
             self_attn_cfg=dict(embed_dims=384),
             ffn_cfg=dict(embed_dims=384, feedforward_channels=2048))))

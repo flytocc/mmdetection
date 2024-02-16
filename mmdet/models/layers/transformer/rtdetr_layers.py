@@ -317,15 +317,10 @@ class CSPLayer(BaseModule):
 
 
 @MODELS.register_module()
-class RTDETRHybridEncoder(BaseModule):
-    """HybridEncoder of RTDETR.
+class RTDETRFPN(BaseModule):
+    """FPN of RTDETR.
 
     Args:
-        layer_cfg (:obj:`ConfigDict` or dict): The config dict for the layer.
-        use_encoder_idx (List[int], optional): The indices of the encoder
-            layers to use. Defaults to [2].
-        num_encoder_layers (int, optional): The number of encoder layers.
-            Defaults to 1.
         in_channels (List[int], optional): The input channels of the
             feature maps. Defaults to [256, 256, 256].
         out_channels (int, optional): The output dimension of the MLP.
@@ -334,8 +329,6 @@ class RTDETRHybridEncoder(BaseModule):
             Defaults to 1.0.
         depth_mult (float, optional): The depth multiplier of the CSPLayer.
             Defaults to 1.0.
-        pe_temperature (float, optional): The temperature of the positional
-            encoding. Defaults to 10000.
         upsample_cfg (dict): Config dict for interpolate layer.
             Default: `dict(scale_factor=2, mode='nearest')`
         conv_cfg (dict, optional): Config dict for convolution layer.
@@ -346,19 +339,14 @@ class RTDETRHybridEncoder(BaseModule):
             activation layers. Defaults to dict(type='SiLU', inplace=True).
         init_cfg (:obj:`ConfigDict` or dict or list[dict] or
             list[:obj:`ConfigDict`], optional): Initialization config dict.
-            Defaults to None.
     """
 
     def __init__(
         self,
-        layer_cfg: ConfigType,
-        use_encoder_idx: List[int] = [2],
-        num_encoder_layers: int = 1,
         in_channels: List[int] = [256, 256, 256],
         out_channels: int = 256,
         expansion: float = 1.0,
         depth_mult: float = 1.0,
-        pe_temperature: float = 10000.0,
         upsample_cfg: ConfigType = dict(scale_factor=2, mode='nearest'),
         conv_cfg: OptConfigType = None,
         norm_cfg: OptConfigType = dict(type='BN', requires_grad=True),
@@ -374,16 +362,7 @@ class RTDETRHybridEncoder(BaseModule):
         super().__init__(init_cfg=init_cfg)
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.use_encoder_idx = use_encoder_idx
-        self.num_encoder_layers = num_encoder_layers
-        self.pe_temperature = pe_temperature
         num_csp_blocks = round(3 * depth_mult)
-
-        # encoder transformer
-        self.transformer_blocks = nn.ModuleList([
-            DetrTransformerEncoder(num_encoder_layers, layer_cfg)
-            for _ in range(len(use_encoder_idx))
-        ])
 
         # top-down fpn
         self.upsample = nn.Upsample(**upsample_cfg)
@@ -443,56 +422,15 @@ class RTDETRHybridEncoder(BaseModule):
                     norm_cfg=norm_cfg,
                     act_cfg=None))
 
-    @staticmethod
-    def build_2d_sincos_position_embedding(
-        w: int,
-        h: int,
-        embed_dim: int = 256,
-        temperature: float = 10000.,
-        device=None,
-    ) -> Tensor:
-        grid_w = torch.arange(w, dtype=torch.float32, device=device)
-        grid_h = torch.arange(h, dtype=torch.float32, device=device)
-        grid_w, grid_h = torch.meshgrid(grid_w, grid_h)
-        assert embed_dim % 4 == 0, ('Embed dimension must be divisible by 4 '
-                                    'for 2D sin-cos position embedding')
-        pos_dim = embed_dim // 4
-        omega = torch.arange(pos_dim, dtype=torch.float32, device=device)
-        omega = temperature**(omega / -pos_dim)
-
-        out_w = grid_w.flatten()[..., None] @ omega[None]
-        out_h = grid_h.flatten()[..., None] @ omega[None]
-
-        pos_embd = [
-            torch.sin(out_w),
-            torch.cos(out_w),
-            torch.sin(out_h),
-            torch.cos(out_h)
-        ]
-        return torch.cat(pos_embd, axis=1)[None, :, :]
-
     def forward(self, inputs: Tuple[Tensor]) -> Tuple[Tensor]:
-        """Forward function."""
-        assert len(inputs) == len(self.in_channels)
-        inputs = list(inputs)
+        """
+        Args:
+            inputs (tuple[Tensor]): input features.
 
-        # encoder
-        if self.num_encoder_layers > 0:
-            for i, enc_ind in enumerate(self.use_encoder_idx):
-                h, w = inputs[enc_ind].shape[2:]
-                # flatten [B, C, H, W] to [B, HxW, C]
-                src_flatten = inputs[enc_ind].flatten(2).permute(
-                    0, 2, 1).contiguous()
-                pos_embed = self.build_2d_sincos_position_embedding(
-                    w,
-                    h,
-                    embed_dim=self.in_channels[enc_ind],
-                    temperature=self.pe_temperature,
-                    device=src_flatten.device)
-                memory = self.transformer_blocks[i](
-                    src_flatten, query_pos=pos_embed, key_padding_mask=None)
-                inputs[enc_ind] = memory.permute(0, 2, 1).contiguous().reshape(
-                    -1, self.in_channels[enc_ind], h, w)
+        Returns:
+            tuple[Tensor]: FPN features.
+        """
+        assert len(inputs) == len(self.in_channels)
 
         # top-down path
         inner_outs = [inputs[-1]]
@@ -524,6 +462,128 @@ class RTDETRHybridEncoder(BaseModule):
             outs[idx] = conv(outs[idx])
 
         return tuple(outs)
+
+
+@MODELS.register_module()
+class RTDETRHybridEncoder(BaseModule):
+    """HybridEncoder of RTDETR.
+
+    Args:
+        layer_cfg (:obj:`ConfigDict` or dict): The config dict for the encode
+            layer.
+        in_channels (List[int], optional): The input channels of the
+            feature maps. Defaults to [256, 256, 256].
+        use_encoder_idx (List[int], optional): The indices of the encoder
+            layers to use. Defaults to [2].
+        num_encoder_layers (int, optional): The number of encoder layers.
+            Defaults to 1.
+        pe_temperature (float, optional): The temperature of the positional
+            encoding. Defaults to 10000.
+        encode_before_fpn (bool, optional): Encoding the features before FPN
+            layer. Defaults to True.
+        fpn_cfg (:obj:`ConfigDict` or dict): The config dict for the FPN layer.
+            Defaults to None.
+        init_cfg (:obj:`ConfigDict` or dict or list[dict] or
+            list[:obj:`ConfigDict`], optional): Initialization config dict.
+    """
+
+    def __init__(
+        self,
+        layer_cfg: ConfigType,
+        in_channels: List[int] = [256, 256, 256],
+        use_encoder_idx: List[int] = [2],
+        num_encoder_layers: int = 1,
+        pe_temperature: float = 10000.0,
+        encode_before_fpn: bool = True,
+        fpn_cfg: OptConfigType = None,
+        init_cfg: OptMultiConfig = dict(
+            type='Kaiming',
+            layer='Conv2d',
+            a=math.sqrt(5),
+            distribution='uniform',
+            mode='fan_in',
+            nonlinearity='leaky_relu')
+    ) -> None:
+        super().__init__(init_cfg=init_cfg)
+        self.in_channels = in_channels
+        self.use_encoder_idx = use_encoder_idx
+        self.num_encoder_layers = num_encoder_layers
+        self.pe_temperature = pe_temperature
+        self.encode_before_fpn = encode_before_fpn
+
+        # fpn layer
+        self.fpn = MODELS.build(fpn_cfg) \
+            if fpn_cfg is not None else nn.Identity()
+
+        # encoder transformer
+        self.transformer_blocks = nn.ModuleList([
+            DetrTransformerEncoder(num_encoder_layers, layer_cfg)
+            for _ in range(len(use_encoder_idx))
+        ])
+
+    @staticmethod
+    def build_2d_sincos_position_embedding(
+        w: int,
+        h: int,
+        embed_dim: int = 256,
+        temperature: float = 10000.,
+        device=None,
+    ) -> Tensor:
+        grid_w = torch.arange(w, dtype=torch.float32, device=device)
+        grid_h = torch.arange(h, dtype=torch.float32, device=device)
+        grid_w, grid_h = torch.meshgrid(grid_w, grid_h)
+        assert embed_dim % 4 == 0, ('Embed dimension must be divisible by 4 '
+                                    'for 2D sin-cos position embedding')
+        pos_dim = embed_dim // 4
+        omega = torch.arange(pos_dim, dtype=torch.float32, device=device)
+        omega = temperature**(omega / -pos_dim)
+
+        out_w = grid_w.flatten()[..., None] @ omega[None]
+        out_h = grid_h.flatten()[..., None] @ omega[None]
+
+        pos_embd = [
+            torch.sin(out_w),
+            torch.cos(out_w),
+            torch.sin(out_h),
+            torch.cos(out_h)
+        ]
+        return torch.cat(pos_embd, axis=1)[None, :, :]
+
+    def encode_forward(self, inputs: Tuple[Tensor]) -> Tuple[Tensor]:
+        """
+        Args:
+            inputs (tuple[Tensor]): input features.
+
+        Returns:
+            tuple[Tensor]: encoded features.
+        """
+        assert len(inputs) == len(self.in_channels)
+        outs = list(inputs)
+
+        # encoder
+        for i, enc_ind in enumerate(self.use_encoder_idx):
+            h, w = outs[enc_ind].shape[2:]
+            # flatten [B, C, H, W] to [B, HxW, C]
+            src_flatten = outs[enc_ind].flatten(2).permute(0, 2,
+                                                           1).contiguous()
+            pos_embed = self.build_2d_sincos_position_embedding(
+                w,
+                h,
+                embed_dim=self.in_channels[enc_ind],
+                temperature=self.pe_temperature,
+                device=src_flatten.device)
+            memory = self.transformer_blocks[i](
+                src_flatten, query_pos=pos_embed, key_padding_mask=None)
+            outs[enc_ind] = memory.permute(0, 2, 1).contiguous().reshape(
+                -1, self.in_channels[enc_ind], h, w)
+
+        return tuple(outs)
+
+    def forward(self, inputs: Tuple[Tensor]) -> Tuple[Tensor]:
+        if self.encode_before_fpn:
+            return self.fpn(self.encode_forward(inputs))
+        else:
+            return self.encode_forward(self.fpn(inputs))
 
 
 class RTDETRTransformerDecoder(DinoTransformerDecoder):

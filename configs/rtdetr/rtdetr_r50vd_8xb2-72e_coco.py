@@ -46,9 +46,12 @@ model = dict(
         use_encoder_idx=[2],
         num_encoder_layers=1,
         in_channels=[256, 256, 256],
-        out_channels=256,
-        expansion=1.0,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
+        fpn_cfg=dict(
+            type='RTDETRFPN',
+            in_channels=[256, 256, 256],
+            out_channels=256,
+            expansion=1.0,
+            norm_cfg=dict(type='SyncBN', requires_grad=True)),
         layer_cfg=dict(
             self_attn_cfg=dict(embed_dims=256, num_heads=8, dropout=0.0),
             ffn_cfg=dict(

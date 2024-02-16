@@ -9,7 +9,7 @@ model = dict(
         norm_eval=False,
         init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
     neck=dict(in_channels=[128, 256, 512]),
-    encoder=dict(expansion=0.5),
+    encoder=dict(fpn_cfg=dict(expansion=0.5)),
     decoder=dict(num_layers=3))
 
 # set all layers in backbone to lr_mult=0.1

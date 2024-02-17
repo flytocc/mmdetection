@@ -5,9 +5,8 @@ from torch import Tensor, nn
 
 from mmdet.registry import MODELS
 from mmdet.structures import SampleList
-
+from ..layers import DeqRTDETRTransformerDecoder, RTDETRHybridEncoder
 from .rtdetr import RTDETR
-from ..layers import RTDETRTHybridEncoder, DeqRTDETRTransformerDecoder
 
 
 @MODELS.register_module()
@@ -15,7 +14,7 @@ class DeepEquilibriumRTDETR(RTDETR):
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
-        self.encoder = RTDETRTHybridEncoder(**self.encoder)
+        self.encoder = RTDETRHybridEncoder(**self.encoder)
         self.decoder = DeqRTDETRTransformerDecoder(**self.decoder)
         self.embed_dims = self.decoder.embed_dims
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
@@ -42,10 +41,10 @@ class DeepEquilibriumRTDETR(RTDETR):
 
         losses_name = set()
         for i in range(self.decoder.extra_supervisions_on_init_head + 1):
-            losses_name.update((
-                'enc_loss_cls', 'enc_loss_bbox', 'enc_loss_iou',
-                f'd{i}.loss_cls', f'd{i}.dn_loss_cls', f'd{i}.loss_bbox',
-                f'd{i}.dn_loss_bbox',  f'd{i}.loss_iou', f'd{i}.dn_loss_iou'))
+            losses_name.update(
+                ('enc_loss_cls', 'enc_loss_bbox', 'enc_loss_iou',
+                 f'd{i}.loss_cls', f'd{i}.dn_loss_cls', f'd{i}.loss_bbox',
+                 f'd{i}.dn_loss_bbox', f'd{i}.loss_iou', f'd{i}.dn_loss_iou'))
 
         refine_loss = 0.0
         for name, loss in losses.items():

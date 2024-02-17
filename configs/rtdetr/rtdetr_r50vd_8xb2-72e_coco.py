@@ -1,6 +1,7 @@
 _base_ = [
     '../_base_/datasets/coco_detection.py', '../_base_/default_runtime.py'
 ]
+pretrained = 'https://github.com/flytocc/mmdetection/releases/download/model_zoo/resnet50vd_ssld_v2_pretrained_d037e232.pth'  # noqa
 
 model = dict(
     type='RTDETR',
@@ -12,12 +13,17 @@ model = dict(
         batch_augments=[
             dict(
                 type='BatchSyncRandomResize',
-                # interval=1,
-                random_size_range=(480, 800))],
+                interval=1,
+                interpolations=['nearest', 'bilinear', 'bicubic', 'area'],
+                random_sizes=[
+                    480, 512, 544, 576, 608, 640, 640, 640, 672, 704, 736, 768,
+                    800
+                ])
+        ],
         mean=[0, 0, 0],  # [123.675, 116.28, 103.53] for DINO
         std=[255, 255, 255],  # [58.395, 57.12, 57.375] for DINO
         bgr_to_rgb=True,
-        pad_size_divisor=32),  # 1 for DINO
+        pad_size_divisor=1),
     backbone=dict(
         type='ResNetV1d',  # ResNet for DINO
         depth=50,
@@ -26,7 +32,8 @@ model = dict(
         frozen_stages=0,  # -1 for DINO
         norm_cfg=dict(type='SyncBN', requires_grad=False),  # BN for DINO
         norm_eval=True,
-        style='pytorch'),
+        style='pytorch',
+        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
     neck=dict(
         type='ChannelMapper',
         in_channels=[512, 1024, 2048],
@@ -39,9 +46,12 @@ model = dict(
         use_encoder_idx=[2],
         num_encoder_layers=1,
         in_channels=[256, 256, 256],
-        out_channels=256,
-        expansion=1.0,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
+        fpn_cfg=dict(
+            type='RTDETRFPN',
+            in_channels=[256, 256, 256],
+            out_channels=256,
+            expansion=1.0,
+            norm_cfg=dict(type='SyncBN', requires_grad=True)),
         layer_cfg=dict(
             self_attn_cfg=dict(embed_dims=256, num_heads=8, dropout=0.0),
             ffn_cfg=dict(
@@ -70,8 +80,9 @@ model = dict(
         loss_cls=dict(
             type='RTDETRVarifocalLoss',  # FocalLoss in DINO
             use_sigmoid=True,
+            alpha=0.75,
             gamma=2.0,
-            alpha=0.75,  # 0.25 in DINO
+            iou_weighted=True,
             loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', loss_weight=5.0),
         loss_iou=dict(type='GIoULoss', loss_weight=2.0)),
@@ -101,35 +112,21 @@ train_pipeline = [
         type='RandomApply',
         transforms=dict(type='PhotoMetricDistortion'),
         prob=0.8),
-    dict(type='Expand', mean=[103.53, 116.28, 123.675]),
+    dict(type='Expand', mean=[0, 0, 0]),
     dict(
-        type='RandomApply',
-        transforms=dict(type='MinIoURandomCrop', bbox_clip_border=False),
+        type='RandomApply', transforms=dict(type='MinIoURandomCrop'),
         prob=0.8),
+    dict(type='FilterAnnotations', min_gt_bbox_wh=(1, 1), keep_empty=False),
     dict(type='RandomFlip', prob=0.5),
-    # dict(
-    #     type='RandomChoice',
-    #     transforms=[[
-    #         dict(
-    #             type='RandomChoiceResize',
-    #             scales=[(480, 480), (512, 512), (544, 544), (576, 576),
-    #                     (608, 608), (640, 640), (640, 640), (640, 640),
-    #                     (672, 672), (704, 704), (736, 736), (768, 768),
-    #                     (800, 800)],
-    #             interpolation=interpolation,
-    #             keep_ratio=False,
-    #             clip_object_border=False)]
-    #         for interpolation in interpolations]),
     dict(
         type='RandomChoice',
         transforms=[[
             dict(
                 type='Resize',
                 scale=(640, 640),
-                interpolation=interpolation,
                 keep_ratio=False,
-                clip_object_border=False)]
-            for interpolation in interpolations]),
+                interpolation=interpolation)
+        ] for interpolation in interpolations]),
     dict(type='FilterAnnotations', min_gt_bbox_wh=(1, 1), keep_empty=False),
     dict(type='PackDetInputs')
 ]
@@ -149,39 +146,20 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=4,
-    num_workers=4,
-    batch_sampler=dict(drop_last=True),  # TODO remove
     dataset=dict(
         filter_cfg=dict(filter_empty_gt=False), pipeline=train_pipeline))
 val_dataloader = dict(dataset=dict(pipeline=test_pipeline))
 test_dataloader = dict(dataset=dict(pipeline=test_pipeline))
 
-# set all layers in backbone to lr_mult=0.1
-# set all norm layers, to decay_multi=0.0
-num_blocks_list = (3, 4, 6, 3)  # r50
-downsample_norm_idx_list = (3, 3, 3, 3)  # r50
-backbone_norm_multi = dict(lr_mult=0.1, decay_mult=0.0)
-custom_keys = {'backbone': dict(lr_mult=0.1, decay_mult=1.0)}
-custom_keys.update({
-    f'backbone.layer{stage_id + 1}.{block_id}.bn': backbone_norm_multi
-    for stage_id, num_blocks in enumerate(num_blocks_list)
-    for block_id in range(num_blocks)
-})
-custom_keys.update({
-    f'backbone.layer{stage_id + 1}.{block_id}.downsample.{downsample_norm_idx - 1}': backbone_norm_multi   # noqa
-    for stage_id, (num_blocks, downsample_norm_idx) in enumerate(zip(num_blocks_list, downsample_norm_idx_list))  # noqa
-    for block_id in range(num_blocks)
-})
 # optimizer
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(
-        type='AdamW',
-        lr=0.0001,
-        weight_decay=0.0001),
+    optimizer=dict(type='AdamW', lr=0.0001, weight_decay=0.0001),
     clip_grad=dict(max_norm=0.1, norm_type=2),
-    paramwise_cfg=dict(custom_keys=custom_keys, norm_decay_mult=0.0))
+    paramwise_cfg=dict(
+        custom_keys={'backbone': dict(lr_mult=0.1)},
+        norm_decay_mult=0,
+        bypass_duplicate=True))
 
 # learning policy
 max_epochs = 72
@@ -198,7 +176,7 @@ param_scheduler = [
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
-# base_batch_size = (4 GPUs) x (4 samples per GPU)
+# base_batch_size = (8 GPUs) x (2 samples per GPU)
 auto_scale_lr = dict(base_batch_size=16)
 
 custom_hooks = [
@@ -207,5 +185,5 @@ custom_hooks = [
         ema_type='ExpMomentumEMA',
         momentum=0.0001,
         update_buffers=True,
-        priority=49),
+        priority=49)
 ]

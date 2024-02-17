@@ -18,8 +18,8 @@ from .grounding_dino_layers import (GroundingDinoTransformerDecoder,
 from .mask2former_layers import (Mask2FormerTransformerDecoder,
                                  Mask2FormerTransformerDecoderLayer,
                                  Mask2FormerTransformerEncoder)
-from .rtdetr_layers import (RTDETRTHybridEncoder, RTDETRTransformerDecoder,
-                            DeqRTDETRTransformerDecoder)
+from .rtdetr_layers import (DeqRTDETRTransformerDecoder, RTDETRHybridEncoder,
+                            RTDETRTransformerDecoder)
 from .utils import (MLP, AdaptivePadding, ConditionalAttention, DynamicConv,
                     PatchEmbed, PatchMerging, coordinate_to_encoding,
                     inverse_sigmoid, nchw_to_nlc, nlc_to_nchw)
@@ -39,6 +39,6 @@ __all__ = [
     'CdnQueryGenerator', 'Mask2FormerTransformerEncoder',
     'Mask2FormerTransformerDecoderLayer', 'Mask2FormerTransformerDecoder',
     'GroundingDinoTransformerDecoderLayer', 'GroundingDinoTransformerEncoder',
-    'GroundingDinoTransformerDecoder', 'RTDETRTHybridEncoder',
+    'GroundingDinoTransformerDecoder', 'RTDETRHybridEncoder',
     'RTDETRTransformerDecoder', 'DeqRTDETRTransformerDecoder'
 ]

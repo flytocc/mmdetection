@@ -485,25 +485,18 @@ class RTDETRHybridEncoder(BaseModule):
             Defaults to None.
         init_cfg (:obj:`ConfigDict` or dict or list[dict] or
             list[:obj:`ConfigDict`], optional): Initialization config dict.
+            Defaults to None.
     """
 
-    def __init__(
-        self,
-        layer_cfg: ConfigType,
-        in_channels: List[int] = [256, 256, 256],
-        use_encoder_idx: List[int] = [2],
-        num_encoder_layers: int = 1,
-        pe_temperature: float = 10000.0,
-        encode_before_fpn: bool = True,
-        fpn_cfg: OptConfigType = None,
-        init_cfg: OptMultiConfig = dict(
-            type='Kaiming',
-            layer='Conv2d',
-            a=math.sqrt(5),
-            distribution='uniform',
-            mode='fan_in',
-            nonlinearity='leaky_relu')
-    ) -> None:
+    def __init__(self,
+                 layer_cfg: ConfigType,
+                 in_channels: List[int] = [256, 256, 256],
+                 use_encoder_idx: List[int] = [2],
+                 num_encoder_layers: int = 1,
+                 pe_temperature: float = 10000.0,
+                 encode_before_fpn: bool = True,
+                 fpn_cfg: OptConfigType = None,
+                 init_cfg: OptMultiConfig = None) -> None:
         super().__init__(init_cfg=init_cfg)
         self.in_channels = in_channels
         self.use_encoder_idx = use_encoder_idx

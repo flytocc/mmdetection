@@ -1366,18 +1366,22 @@ class MinIoURandomCrop(BaseTransform):
     Args:
         min_ious (Sequence[float]): minimum IoU threshold for all intersections
             with bounding boxes.
-        min_crop_size (float): minimum crop's size (i.e. h,w := a*h, a*w,
-        where a >= min_crop_size).
+        cover_all_box (bool, optional): ensure all bboxes are covered in the
+            final crop. Defaults to True.
+        min_crop_size (float, optional): minimum crop's size (i.e. h,w := a*h,
+            a*w, where a >= min_crop_size). Defaults to 0.3.
         bbox_clip_border (bool, optional): Whether clip the objects outside
             the border of the image. Defaults to True.
     """
 
     def __init__(self,
                  min_ious: Sequence[float] = (0.1, 0.3, 0.5, 0.7, 0.9),
+                 cover_all_box: bool = True,
                  min_crop_size: float = 0.3,
                  bbox_clip_border: bool = True) -> None:
 
         self.min_ious = min_ious
+        self.cover_all_box = cover_all_box
         self.sample_mode = (1, *min_ious, 0)
         self.min_crop_size = min_crop_size
         self.bbox_clip_border = bbox_clip_border
@@ -1429,8 +1433,13 @@ class MinIoURandomCrop(BaseTransform):
                 overlaps = boxes.overlaps(
                     HorizontalBoxes(patch.reshape(-1, 4).astype(np.float32)),
                     boxes).numpy().reshape(-1)
-                if len(overlaps) > 0 and overlaps.min() < min_iou:
-                    continue
+
+                if len(overlaps) > 0:
+                    if overlaps.max() < min_iou:
+                        continue
+
+                    if self.cover_all_box and overlaps.min() < min_iou:
+                        continue
 
                 # center of boxes should inside the crop img
                 # only adjust boxes and instance masks when the gt is not empty

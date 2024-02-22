@@ -14,7 +14,6 @@ model = dict(
             dict(
                 type='BatchSyncRandomResize',
                 interval=1,
-                interpolations=['nearest', 'bilinear', 'bicubic', 'area'],
                 random_sizes=[
                     480, 512, 544, 576, 608, 640, 640, 640, 672, 704, 736, 768,
                     800
@@ -104,7 +103,6 @@ model = dict(
 
 # train_pipeline, NOTE the img_scale and the Pad's size_divisor is different
 # from the default setting in mmdet.
-interpolations = ['nearest', 'bilinear', 'bicubic', 'area', 'lanczos']
 train_pipeline = [
     dict(type='LoadImageFromFile', backend_args={{_base_.backend_args}}),
     dict(type='LoadAnnotations', with_bbox=True),
@@ -114,19 +112,16 @@ train_pipeline = [
         prob=0.8),
     dict(type='Expand', mean=[0, 0, 0]),
     dict(
-        type='RandomApply', transforms=dict(type='MinIoURandomCrop'),
+        type='RandomApply',
+        transforms=dict(type='MinIoURandomCrop', cover_all_box=False),
         prob=0.8),
     dict(type='FilterAnnotations', min_gt_bbox_wh=(1, 1), keep_empty=False),
     dict(type='RandomFlip', prob=0.5),
     dict(
-        type='RandomChoice',
-        transforms=[[
-            dict(
-                type='Resize',
-                scale=(640, 640),
-                keep_ratio=False,
-                interpolation=interpolation)
-        ] for interpolation in interpolations]),
+        type='Resize',
+        scale=(640, 640),
+        keep_ratio=False,
+        interpolation='bicubic'),
     dict(type='FilterAnnotations', min_gt_bbox_wh=(1, 1), keep_empty=False),
     dict(type='PackDetInputs')
 ]
@@ -146,6 +141,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
+    batch_sampler=None,
     dataset=dict(
         filter_cfg=dict(filter_empty_gt=False), pipeline=train_pipeline))
 val_dataloader = dict(dataset=dict(pipeline=test_pipeline))

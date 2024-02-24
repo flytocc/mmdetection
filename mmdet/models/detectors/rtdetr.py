@@ -37,6 +37,9 @@ class RTDETR(DINO):
         for m in self.modules():
             if isinstance(m, MultiScaleDeformableAttention):
                 m.init_weights()
+            elif isinstance(m, nn.MultiheadAttention):
+                m.out_proj.reset_parameters()
+                nn.init.constant_(m.out_proj.bias, 0.)
         nn.init.xavier_uniform_(self.memory_trans_fc.weight)
 
     def pre_transformer(

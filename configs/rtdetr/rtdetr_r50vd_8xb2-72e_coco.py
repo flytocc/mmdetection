@@ -40,7 +40,14 @@ model = dict(
         out_channels=256,
         act_cfg=None,
         norm_cfg=dict(type='SyncBN', requires_grad=True),  # GN for DINO
-        num_outs=3),  # 4 for DINO
+        num_outs=3,  # 4 for DINO
+        init_cfg=dict(
+            type='Kaiming',
+            layer='Conv2d',
+            a=5**.5,
+            distribution='uniform',
+            mode='fan_in',
+            nonlinearity='leaky_relu')),
     encoder=dict(
         use_encoder_idx=[2],
         num_encoder_layers=1,
@@ -153,8 +160,16 @@ optim_wrapper = dict(
     optimizer=dict(type='AdamW', lr=0.0001, weight_decay=0.0001),
     clip_grad=dict(max_norm=0.1, norm_type=2),
     paramwise_cfg=dict(
-        custom_keys={'backbone': dict(lr_mult=0.1)},
+        custom_keys={
+            'backbone': dict(lr_mult=0.1),
+            'neck.convs.0.bn.weight': dict(decay_mult=1),
+            'neck.convs.1.bn.weight': dict(decay_mult=1),
+            'neck.convs.2.bn.weight': dict(decay_mult=1),
+            'memory_trans_norm': dict(decay_mult=0),
+            'in_proj_bias': dict(decay_mult=0),  # nn.MultiheadAttention
+        },
         norm_decay_mult=0,
+        bias_decay_mult=0,
         bypass_duplicate=True))
 
 # learning policy

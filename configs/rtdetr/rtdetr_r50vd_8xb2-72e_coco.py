@@ -115,7 +115,7 @@ train_pipeline = [
     dict(type='LoadAnnotations', with_bbox=True),
     dict(
         type='RandomApply',
-        transforms=dict(type='PhotoMetricDistortion'),
+        transforms=dict(type='PhotoMetricDistortion', hue_delta=12),
         prob=0.8),
     dict(type='Expand', mean=[0, 0, 0]),
     dict(

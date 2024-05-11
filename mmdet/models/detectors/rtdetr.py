@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Dict, Tuple
+from functools import lru_cache
+from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -201,7 +202,7 @@ class RTDETR(DINO):
         else:
             reference_points = topk_coords_unact
             dn_mask, dn_meta = None, None
-        reference_points = reference_points.sigmoid()
+        # reference_points = reference_points.sigmoid()
 
         decoder_inputs_dict = dict(
             query=query,
@@ -216,3 +217,51 @@ class RTDETR(DINO):
             enc_outputs_coord=topk_coords,
             dn_meta=dn_meta) if self.training else dict()
         return decoder_inputs_dict, head_inputs_dict
+
+    def gen_encoder_output_proposals(
+            self, memory: Tensor, memory_mask: Tensor,
+            spatial_shapes: Tensor) -> Tuple[Tensor, Tensor]:
+        assert memory_mask is None
+
+        spatial_shapes = tuple(map(tuple, spatial_shapes.tolist()))
+        output_proposals, output_proposals_invalid = self.gen_proposals(
+            spatial_shapes, memory.size(0), memory.device)
+
+        output_memory = memory.masked_fill(output_proposals_invalid, float(0))
+        output_memory = self.memory_trans_fc(output_memory)
+        output_memory = self.memory_trans_norm(output_memory)
+        # [bs, sum(hw), 2]
+        return output_memory, output_proposals
+
+    @staticmethod
+    @lru_cache
+    def gen_proposals(spatial_shapes: Tuple[Tuple[int, int]],
+                      batch_size: int = 1,
+                      device: Optional[str] = None) -> Tuple[Tensor, Tensor]:
+        proposals = []
+        for lvl, HW in enumerate(spatial_shapes):
+            H, W = HW
+            HW = torch.tensor(HW, dtype=torch.float32, device=device)
+            scale = HW.unsqueeze(0).flip(dims=[0, 1]).view(1, 1, 1, 2)
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(
+                    0, H - 1, H, dtype=torch.float32, device=device),
+                torch.linspace(
+                    0, W - 1, W, dtype=torch.float32, device=device))
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+            grid = (grid.unsqueeze(0).expand(batch_size, -1, -1, -1) +
+                    0.5) / scale
+            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+            proposal = torch.cat((grid, wh), -1).view(batch_size, -1, 4)
+            proposals.append(proposal)
+        output_proposals = torch.cat(proposals, 1)
+        # do not use `all` to make it exportable to onnx
+        output_proposals_invalid = (
+            (output_proposals > 0.01) & (output_proposals < 0.99)).sum(
+                -1, keepdim=True) != output_proposals.shape[-1]
+        # inverse_sigmoid
+        output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        output_proposals = output_proposals.masked_fill(
+            output_proposals_invalid, float('inf'))
+
+        return output_proposals, output_proposals_invalid

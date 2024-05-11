@@ -300,8 +300,8 @@ class FocalLossCost(BaseMatchCost):
         pos_cost = -(cls_pred + self.eps).log() * self.alpha * (
             1 - cls_pred).pow(self.gamma)
 
-        cls_cost = torch.einsum('nc,mc->nm', pos_cost, gt_labels) + \
-            torch.einsum('nc,mc->nm', neg_cost, (1 - gt_labels))
+        with torch.cuda.amp.autocast(enabled=False):
+            cls_cost = pos_cost @ gt_labels.T + neg_cost @ (1 - gt_labels).T
         return cls_cost / n * self.weight
 
     def __call__(self,

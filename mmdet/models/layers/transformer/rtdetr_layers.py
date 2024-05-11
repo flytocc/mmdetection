@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
+from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -12,7 +13,7 @@ from mmdet.models.layers.transformer.detr_layers import DetrTransformerEncoder
 from mmdet.registry import MODELS
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from .dino_layers import DinoTransformerDecoder
-from .utils import MLP, inverse_sigmoid
+from .utils import MLP
 
 
 class RepVGGBlock(nn.Module):
@@ -515,6 +516,7 @@ class RTDETRHybridEncoder(BaseModule):
         ])
 
     @staticmethod
+    @lru_cache
     def build_2d_sincos_position_embedding(
         w: int,
         h: int,
@@ -633,9 +635,16 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
               layers, has shape (num_decoder_layers, bs, num_queries, 4). The
               coordinates are arranged as (cx, cy, w, h)
         """
+        assert self.return_intermediate
+        assert reg_branches is not None
+        assert reference_points.shape[-1] == 4
+        unact_reference_points = reference_points
+
         intermediate = []
-        intermediate_reference_points = [reference_points]
+        intermediate_reference_points = []
         for lid, layer in enumerate(self.layers):
+            reference_points = unact_reference_points.sigmoid().detach()
+
             reference_points_input = reference_points[:, :, None]
             query_pos = self.ref_point_head(reference_points)
 
@@ -651,22 +660,13 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
                 reference_points=reference_points_input,
                 **kwargs)
 
-            if reg_branches is not None:
-                tmp = reg_branches[lid](query)
-                assert reference_points.shape[-1] == 4
-                new_reference_points = tmp + inverse_sigmoid(
-                    reference_points, eps=1e-3)
-                new_reference_points = new_reference_points.sigmoid()
-                reference_points = new_reference_points.detach()
+            tmp = reg_branches[lid](query)
 
-            if self.return_intermediate:
-                intermediate.append(self.norm(query))
-                intermediate_reference_points.append(new_reference_points)
-                # NOTE this is for the "Look Forward Twice" module,
-                # in the DeformDETR, reference_points was appended.
+            intermediate.append(self.norm(query))
+            intermediate_reference_points.append(
+                (tmp + unact_reference_points).sigmoid())
 
-        if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(
-                intermediate_reference_points)
+            if lid < len(self.layers) - 1:
+                unact_reference_points = tmp + unact_reference_points.detach()
 
-        return query, reference_points
+        return intermediate, intermediate_reference_points

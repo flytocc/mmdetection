@@ -1292,7 +1292,7 @@ class Expand(BaseTransform):
         h, w, c = img.shape
         ratio = self._random_ratio()
         # speedup expand when meets large image
-        if np.all(self.mean == self.mean[0]):
+        if len(set(self.mean)) == 1:
             expand_img = np.empty((int(h * ratio), int(w * ratio), c),
                                   img.dtype)
             expand_img.fill(self.mean[0])

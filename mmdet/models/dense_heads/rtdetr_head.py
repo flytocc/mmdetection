@@ -22,6 +22,45 @@ class RTDETRHead(DINOHead):
     <https://arxiv.org/abs/2304.08069>`_ .
     """
 
+    def forward(self, hidden_states: List[Tensor],
+                references: List[Tensor]) -> Tuple[Tensor, Tensor]:
+        all_layers_outputs_classes = []
+        all_layers_outputs_coords = \
+            references if self.training else references[-1:]
+
+        for layer_id in range(len(hidden_states)):
+            if not self.training and layer_id < len(hidden_states) - 1:
+                continue
+
+            hidden_state = hidden_states[layer_id]
+            outputs_class = self.cls_branches[layer_id](hidden_state)
+            all_layers_outputs_classes.append(outputs_class)
+
+        return all_layers_outputs_classes, all_layers_outputs_coords
+
+    @staticmethod
+    def split_outputs(all_layers_cls_scores: List[Tensor],
+                      all_layers_bbox_preds: List[Tensor],
+                      dn_meta: Dict[str, int]) -> Tuple[Tensor]:
+        num_denoising_queries = dn_meta['num_denoising_queries']
+        if dn_meta is not None:
+            all_layers_denoising_cls_scores = \
+                [o[:, :num_denoising_queries] for o in all_layers_cls_scores]
+            all_layers_denoising_bbox_preds = \
+                [o[:, : num_denoising_queries] for o in all_layers_bbox_preds]
+            all_layers_matching_cls_scores = \
+                [o[:, num_denoising_queries:] for o in all_layers_cls_scores]
+            all_layers_matching_bbox_preds = \
+                [o[:, num_denoising_queries:] for o in all_layers_bbox_preds]
+        else:
+            all_layers_denoising_cls_scores = None
+            all_layers_denoising_bbox_preds = None
+            all_layers_matching_cls_scores = all_layers_cls_scores
+            all_layers_matching_bbox_preds = all_layers_bbox_preds
+        return (all_layers_matching_cls_scores, all_layers_matching_bbox_preds,
+                all_layers_denoising_cls_scores,
+                all_layers_denoising_bbox_preds)
+
     def _loss_dn_single(self, dn_cls_scores: Tensor, dn_bbox_preds: Tensor,
                         batch_gt_instances: InstanceList,
                         batch_img_metas: List[dict],

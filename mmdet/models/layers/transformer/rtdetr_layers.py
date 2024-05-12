@@ -639,6 +639,9 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
         assert reg_branches is not None
         assert reference_points.shape[-1] == 4
         unact_reference_points = reference_points
+        eval_idx = kwargs.pop('eval_idx', -1)
+        if eval_idx < 0:
+            eval_idx = eval_idx + len(self.layers)
 
         intermediate = []
         intermediate_reference_points = []
@@ -663,10 +666,14 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
             tmp = reg_branches[lid](query)
 
             intermediate.append(self.norm(query))
-            intermediate_reference_points.append(
-                (tmp + unact_reference_points).sigmoid())
 
-            if lid < len(self.layers) - 1:
-                unact_reference_points = tmp + unact_reference_points.detach()
+            if self.training or lid == eval_idx:
+                intermediate_reference_points.append(
+                    (tmp + unact_reference_points).sigmoid())
+
+            if lid == eval_idx:
+                break
+
+            unact_reference_points = tmp + unact_reference_points.detach()
 
         return intermediate, intermediate_reference_points

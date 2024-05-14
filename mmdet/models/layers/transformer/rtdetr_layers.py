@@ -495,6 +495,7 @@ class RTDETRHybridEncoder(BaseModule):
                  use_encoder_idx: List[int] = [2],
                  num_encoder_layers: int = 1,
                  pe_temperature: float = 10000.0,
+                 spatial_shapes: Optional[Tuple[Tuple[int, int]]] = None,
                  encode_before_fpn: bool = True,
                  fpn_cfg: OptConfigType = None,
                  init_cfg: OptMultiConfig = None) -> None:
@@ -515,6 +516,15 @@ class RTDETRHybridEncoder(BaseModule):
             for _ in range(len(use_encoder_idx))
         ])
 
+        if spatial_shapes is not None:
+            for idx in range(len(use_encoder_idx)):
+                position_embedding = self.build_2d_sincos_position_embedding(
+                    *spatial_shapes[idx], in_channels[idx])
+                self.register_buffer(
+                    f'position_embedding_{idx}',
+                    position_embedding,
+                    persistent=False)
+
     @staticmethod
     @lru_cache
     def build_2d_sincos_position_embedding(
@@ -522,7 +532,7 @@ class RTDETRHybridEncoder(BaseModule):
         h: int,
         embed_dim: int = 256,
         temperature: float = 10000.,
-        device=None,
+        device: Optional[str] = None,
     ) -> Tensor:
         grid_w = torch.arange(w, dtype=torch.float32, device=device)
         grid_h = torch.arange(h, dtype=torch.float32, device=device)
@@ -561,12 +571,14 @@ class RTDETRHybridEncoder(BaseModule):
             # flatten [B, C, H, W] to [B, HxW, C]
             src_flatten = outs[enc_ind].flatten(2).permute(0, 2,
                                                            1).contiguous()
-            pos_embed = self.build_2d_sincos_position_embedding(
-                w,
-                h,
-                embed_dim=self.in_channels[enc_ind],
-                temperature=self.pe_temperature,
-                device=src_flatten.device)
+            pos_embed = getattr(self, f'position_embedding_{enc_ind}', None)
+            if pos_embed is None:
+                pos_embed = self.build_2d_sincos_position_embedding(
+                    w,
+                    h,
+                    embed_dim=self.in_channels[enc_ind],
+                    temperature=self.pe_temperature,
+                    device=src_flatten.device)
             memory = self.transformer_blocks[i](
                 src_flatten, query_pos=pos_embed, key_padding_mask=None)
             outs[enc_ind] = memory.permute(0, 2, 1).contiguous().reshape(

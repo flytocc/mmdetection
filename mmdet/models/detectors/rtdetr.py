@@ -21,6 +21,24 @@ class RTDETR(DINO):
     <https://github.com/lyuwenyu/RT-DETR>`_.
     """
 
+    def __init__(self,
+                 *args,
+                 eval_idx: int = -1,
+                 spatial_shapes: Optional[Tuple[Tuple[int, int]]] = None,
+                 **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.eval_idx = eval_idx
+
+        if spatial_shapes is not None:
+            spatial_shapes = tuple(map(tuple, spatial_shapes))
+            kwargs['decoder']['spatial_shapes'] = spatial_shapes
+            proposals, proposals_valid = self.gen_proposals(spatial_shapes)
+            self.register_buffer('proposals', proposals, persistent=False)
+            self.register_buffer(
+                'proposals_valid', proposals_valid, persistent=False)
+        else:
+            self.proposals, self.proposals_valid = None, None
+
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
         self.encoder = RTDETRHybridEncoder(**self.encoder)
@@ -208,7 +226,8 @@ class RTDETR(DINO):
             query=query,
             memory=memory,
             reference_points=reference_points,
-            dn_mask=dn_mask)
+            dn_mask=dn_mask,
+            eval_idx=self.eval_idx)
         # NOTE DINO calculates encoder losses on scores and coordinates
         # of selected top-k encoder queries, while DeformDETR is of all
         # encoder queries.
@@ -223,11 +242,17 @@ class RTDETR(DINO):
             spatial_shapes: Tensor) -> Tuple[Tensor, Tensor]:
         assert memory_mask is None
 
-        spatial_shapes = tuple(map(tuple, spatial_shapes.tolist()))
-        output_proposals, output_proposals_invalid = self.gen_proposals(
-            spatial_shapes, memory.size(0), memory.device)
+        batch_size = memory.size(0)
+        if (not self.training and self.proposals is not None
+                and self.proposals_valid is not None and batch_size == 1):
+            output_proposals = self.proposals
+            output_proposals_valid = self.proposals_valid
+        else:
+            spatial_shapes = tuple(map(tuple, spatial_shapes.tolist()))
+            output_proposals, output_proposals_valid = self.gen_proposals(
+                spatial_shapes, batch_size, memory.device)
 
-        output_memory = memory.masked_fill(output_proposals_invalid, float(0))
+        output_memory = memory * output_proposals_valid
         output_memory = self.memory_trans_fc(output_memory)
         output_memory = self.memory_trans_norm(output_memory)
         # [bs, sum(hw), 2]
@@ -256,12 +281,12 @@ class RTDETR(DINO):
             proposals.append(proposal)
         output_proposals = torch.cat(proposals, 1)
         # do not use `all` to make it exportable to onnx
-        output_proposals_invalid = (
+        output_proposals_valid = (
             (output_proposals > 0.01) & (output_proposals < 0.99)).sum(
-                -1, keepdim=True) != output_proposals.shape[-1]
+                -1, keepdim=True) == output_proposals.shape[-1]
         # inverse_sigmoid
         output_proposals = torch.log(output_proposals / (1 - output_proposals))
         output_proposals = output_proposals.masked_fill(
-            output_proposals_invalid, float('inf'))
+            ~output_proposals_valid, float('inf'))
 
-        return output_proposals, output_proposals_invalid
+        return output_proposals, output_proposals_valid.float()

@@ -22,6 +22,72 @@ class RTDETRHead(DINOHead):
     <https://arxiv.org/abs/2304.08069>`_ .
     """
 
+    def __init__(self, *args, bbox_reparam: bool = False, **kwargs):
+        self.bbox_reparam = bbox_reparam
+        super().__init__(*args, **kwargs)
+
+    def forward(self, hidden_states: Tensor,
+                references: List[Tensor]) -> Tuple[Tensor, Tensor]:
+        """Forward function.
+
+        Args:
+            hidden_states (Tensor): Hidden states output from each decoder
+                layer, has shape (num_decoder_layers, bs, num_queries, dim).
+            references (list[Tensor]): List of the reference from the decoder.
+                The first reference is the `init_reference` (initial) and the
+                other num_decoder_layers(6) references are `inter_references`
+                (intermediate). The `init_reference` has shape (bs,
+                num_queries, 4) when `as_two_stage` of the detector is `True`,
+                otherwise (bs, num_queries, 2). Each `inter_reference` has
+                shape (bs, num_queries, 4) when `with_box_refine` of the
+                detector is `True`, otherwise (bs, num_queries, 2). The
+                coordinates are arranged as (cx, cy) when the last dimension is
+                2, and (cx, cy, w, h) when it is 4.
+
+        Returns:
+            tuple[Tensor]: results of head containing the following tensor.
+
+            - all_layers_outputs_classes (Tensor): Outputs from the
+              classification head, has shape (num_decoder_layers, bs,
+              num_queries, cls_out_channels).
+            - all_layers_outputs_coords (Tensor): Sigmoid outputs from the
+              regression head with normalized coordinate format (cx, cy, w,
+              h), has shape (num_decoder_layers, bs, num_queries, 4) with the
+              last dimension arranged as (cx, cy, w, h).
+        """
+        if not self.bbox_reparam:
+            return super().forward(hidden_states, references)
+
+        all_layers_outputs_classes = []
+        all_layers_outputs_coords = []
+
+        for layer_id in range(hidden_states.shape[0]):
+            reference = references[layer_id]
+            # NOTE The last reference will not be used.
+            hidden_state = hidden_states[layer_id]
+            outputs_class = self.cls_branches[layer_id](hidden_state)
+            tmp_reg_preds = self.reg_branches[layer_id](hidden_state)
+            if reference.shape[-1] == 4:
+                # When `layer` is 0 and `as_two_stage` of the detector
+                # is `True`, or when `layer` is greater than 0 and
+                # `with_box_refine` of the detector is `True`.
+                outputs_coord_cxcy = tmp_reg_preds[..., :2] * reference[..., 2:] + reference[..., :2]
+                outputs_coord_wh = tmp_reg_preds[..., 2:].exp() * reference[..., 2:]
+                outputs_coord = torch.cat([outputs_coord_cxcy, outputs_coord_wh], dim=-1)
+            else:
+                # When `layer` is 0 and `as_two_stage` of the detector
+                # is `False`, or when `layer` is greater than 0 and
+                # `with_box_refine` of the detector is `False`.
+                assert reference.shape[-1] == 2
+                outputs_coord = tmp_reg_preds[..., :2] * reference[..., 2:] + reference[..., :2]
+            all_layers_outputs_classes.append(outputs_class)
+            all_layers_outputs_coords.append(outputs_coord)
+
+        all_layers_outputs_classes = torch.stack(all_layers_outputs_classes)
+        all_layers_outputs_coords = torch.stack(all_layers_outputs_coords)
+
+        return all_layers_outputs_classes, all_layers_outputs_coords
+
     def _loss_dn_single(self, dn_cls_scores: Tensor, dn_bbox_preds: Tensor,
                         batch_gt_instances: InstanceList,
                         batch_img_metas: List[dict],

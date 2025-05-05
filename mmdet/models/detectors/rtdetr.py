@@ -20,6 +20,12 @@ class RTDETR(DINO):
     <https://github.com/lyuwenyu/RT-DETR>`_.
     """
 
+    def __init__(self, *args, bbox_reparam: bool = False, **kwargs):
+        self.bbox_reparam = bbox_reparam
+        if bbox_reparam:
+            kwargs['bbox_head']['bbox_reparam'] = bbox_reparam
+        super().__init__(*args, **kwargs)
+
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
         self.encoder = RTDETRHybridEncoder(**self.encoder)
@@ -166,13 +172,30 @@ class RTDETR(DINO):
         cls_out_features = self.bbox_head.cls_branches[
             self.decoder.num_layers].out_features
 
-        output_memory, output_proposals = self.gen_encoder_output_proposals(
-            memory, memory_mask, spatial_shapes)
+        if self.bbox_reparam:
+            output_memory, output_proposals = self.gen_encoder_output_proposals_sigmoid(
+                memory, memory_mask, spatial_shapes)
+        else:
+            output_memory, output_proposals = self.gen_encoder_output_proposals(
+                memory, memory_mask, spatial_shapes)
         enc_outputs_class = self.bbox_head.cls_branches[
             self.decoder.num_layers](
                 output_memory)
-        enc_outputs_coord_unact = self.bbox_head.reg_branches[
-            self.decoder.num_layers](output_memory) + output_proposals
+
+        if self.bbox_reparam:
+            enc_outputs_coord_delta = self.bbox_head.reg_branches[
+                self.decoder.num_layers](
+                    output_memory)
+            enc_outputs_coord_cxcy = enc_outputs_coord_delta[
+                ..., :2] * output_proposals[...,
+                                            2:] + output_proposals[..., :2]
+            enc_outputs_coord_wh = enc_outputs_coord_delta[
+                ..., 2:].exp() * output_proposals[..., 2:]
+            enc_outputs_coord = torch.cat(
+                [enc_outputs_coord_cxcy, enc_outputs_coord_wh], dim=-1)
+        else:
+            enc_outputs_coord_unact = self.bbox_head.reg_branches[
+                self.decoder.num_layers](output_memory) + output_proposals
 
         # NOTE The DINO selects top-k proposals according to scores of
         # multi-class classification, while DeformDETR, where the input
@@ -183,11 +206,16 @@ class RTDETR(DINO):
         topk_score = torch.gather(
             enc_outputs_class, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
-        topk_coords_unact = torch.gather(
-            enc_outputs_coord_unact, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, 4))
-        topk_coords = topk_coords_unact.sigmoid()
-        topk_coords_unact = topk_coords_unact.detach()
+        if self.bbox_reparam:
+            topk_coords = torch.gather(
+                enc_outputs_coord, 1,
+                topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+        else:
+            topk_coords_unact = torch.gather(
+                enc_outputs_coord_unact, 1,
+                topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+            topk_coords = topk_coords_unact.sigmoid()
+        topk_coords_detach = topk_coords.detach()
 
         query = torch.gather(output_memory, 1,
                              topk_indices.unsqueeze(-1).repeat(1, 1, c))
@@ -196,18 +224,18 @@ class RTDETR(DINO):
                 self.dn_query_generator(batch_data_samples)
             query = query.detach()  # detach() is not used in DINO
             query = torch.cat([dn_label_query, query], dim=1)
-            reference_points = torch.cat([dn_bbox_query, topk_coords_unact],
-                                         dim=1)
+            reference_points = torch.cat(
+                [dn_bbox_query.sigmoid(), topk_coords_detach], dim=1)
         else:
-            reference_points = topk_coords_unact
+            reference_points = topk_coords_detach
             dn_mask, dn_meta = None, None
-        reference_points = reference_points.sigmoid()
 
         decoder_inputs_dict = dict(
             query=query,
             memory=memory,
             reference_points=reference_points,
-            dn_mask=dn_mask)
+            dn_mask=dn_mask,
+            bbox_reparam=self.bbox_reparam)
         # NOTE DINO calculates encoder losses on scores and coordinates
         # of selected top-k encoder queries, while DeformDETR is of all
         # encoder queries.
@@ -216,3 +244,80 @@ class RTDETR(DINO):
             enc_outputs_coord=topk_coords,
             dn_meta=dn_meta) if self.training else dict()
         return decoder_inputs_dict, head_inputs_dict
+
+    def gen_encoder_output_proposals_sigmoid(
+            self, memory: Tensor, memory_mask: Tensor,
+            spatial_shapes: Tensor) -> Tuple[Tensor, Tensor]:
+        """Generate proposals from encoded memory. The function will only be
+        used when `as_two_stage` is `True`.
+
+        Args:
+            memory (Tensor): The output embeddings of the Transformer encoder,
+                has shape (bs, num_feat_points, dim).
+            memory_mask (Tensor): ByteTensor, the padding mask of the memory,
+                has shape (bs, num_feat_points).
+            spatial_shapes (Tensor): Spatial shapes of features in all levels,
+                has shape (num_levels, 2), last dimension represents (h, w).
+
+        Returns:
+            tuple: A tuple of transformed memory and proposals.
+
+            - output_memory (Tensor): The transformed memory for obtaining
+              top-k proposals, has shape (bs, num_feat_points, dim).
+            - output_proposals (Tensor): The inverse-normalized proposal, has
+              shape (batch_size, num_keys, 4) with the last dimension arranged
+              as (cx, cy, w, h).
+        """
+
+        bs = memory.size(0)
+        proposals = []
+        _cur = 0  # start index in the sequence of the current level
+        for lvl, HW in enumerate(spatial_shapes):
+            H, W = HW
+
+            if memory_mask is not None:
+                mask_flatten_ = memory_mask[:, _cur:(_cur + H * W)].view(
+                    bs, H, W, 1)
+                valid_H = torch.sum(~mask_flatten_[:, :, 0, 0],
+                                    1).unsqueeze(-1)
+                valid_W = torch.sum(~mask_flatten_[:, 0, :, 0],
+                                    1).unsqueeze(-1)
+                scale = torch.cat([valid_W, valid_H], 1).view(bs, 1, 1, 2)
+            else:
+                if not isinstance(HW, torch.Tensor):
+                    HW = memory.new_tensor(HW)
+                scale = HW.unsqueeze(0).flip(dims=[0, 1]).view(1, 1, 1, 2)
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(
+                    0, H - 1, H, dtype=torch.float32, device=memory.device),
+                torch.linspace(
+                    0, W - 1, W, dtype=torch.float32, device=memory.device))
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+            grid = (grid.unsqueeze(0).expand(bs, -1, -1, -1) + 0.5) / scale
+            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+            proposal = torch.cat((grid, wh), -1).view(bs, -1, 4)
+            proposals.append(proposal)
+            _cur += (H * W)
+        output_proposals = torch.cat(proposals, 1)
+        # do not use `all` to make it exportable to onnx
+        output_proposals_valid = (
+            (output_proposals > 0.01) & (output_proposals < 0.99)).sum(
+                -1, keepdim=True) == output_proposals.shape[-1]
+        # inverse_sigmoid
+        # output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        if memory_mask is not None:
+            output_proposals = output_proposals.masked_fill(
+                memory_mask.unsqueeze(-1), 0)
+        output_proposals = output_proposals.masked_fill(
+            ~output_proposals_valid, 0)
+
+        output_memory = memory
+        if memory_mask is not None:
+            output_memory = output_memory.masked_fill(
+                memory_mask.unsqueeze(-1), float(0))
+        output_memory = output_memory.masked_fill(~output_proposals_valid,
+                                                  float(0))
+        output_memory = self.memory_trans_fc(output_memory)
+        output_memory = self.memory_trans_norm(output_memory)
+        # [bs, sum(hw), 2]
+        return output_memory, output_proposals

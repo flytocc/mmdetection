@@ -633,6 +633,8 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
               layers, has shape (num_decoder_layers, bs, num_queries, 4). The
               coordinates are arranged as (cx, cy, w, h)
         """
+        bbox_reparam = kwargs.pop('bbox_reparam', False)
+
         intermediate = []
         intermediate_reference_points = [reference_points]
         for lid, layer in enumerate(self.layers):
@@ -654,9 +656,18 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
             if reg_branches is not None:
                 tmp = reg_branches[lid](query)
                 assert reference_points.shape[-1] == 4
-                new_reference_points = tmp + inverse_sigmoid(
-                    reference_points, eps=1e-3)
-                new_reference_points = new_reference_points.sigmoid()
+                if bbox_reparam:
+                    new_reference_cxcy = tmp[..., :2] * reference_points[
+                        ..., 2:] + reference_points[..., :2]
+                    new_reference_wh = tmp[...,
+                                           2:].exp() * reference_points[...,
+                                                                        2:]
+                    new_reference_points = torch.cat(
+                        [new_reference_cxcy, new_reference_wh], dim=-1)
+                else:
+                    new_reference_points = tmp + inverse_sigmoid(
+                        reference_points, eps=1e-3)
+                    new_reference_points = new_reference_points.sigmoid()
                 reference_points = new_reference_points.detach()
 
             if self.return_intermediate:

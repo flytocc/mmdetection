@@ -32,6 +32,18 @@ Models:
           box AP: 46.5
     Weights: https://github.com/flytocc/mmdetection/releases/download/model_zoo/rtdetr_r18vd_8xb2-72e_coco_3dda8dd4.pth
 
+  - Name: rtdetr_r18vd_8xb2-72e_coco_bbox_reparam
+    In Collection: RT-DETR
+    Config: configs/rtdetr/rtdetr_r18vd_8xb2-72e_coco_bbox_reparam.py
+    Metadata:
+      Epochs: 72
+    Results:
+      - Task: Object Detection
+        Dataset: COCO
+        Metrics:
+          box AP: 47.3
+    Weights: ~
+
   - Name: rtdetr_r34vd_8xb2-72e_coco
     In Collection: RT-DETR
     Config: configs/rtdetr/rtdetr_r34vd_8xb2-72e_coco.py

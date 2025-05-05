@@ -270,13 +270,13 @@ class FocalLossCost(BaseMatchCost):
         Returns:
             torch.Tensor: cls_cost value with weight
         """
-        cls_pred = cls_pred.sigmoid()
+        cls_pred = cls_pred[:, gt_labels].sigmoid()
         neg_cost = -(1 - cls_pred + self.eps).log() * (
             1 - self.alpha) * cls_pred.pow(self.gamma)
         pos_cost = -(cls_pred + self.eps).log() * self.alpha * (
             1 - cls_pred).pow(self.gamma)
 
-        cls_cost = pos_cost[:, gt_labels] - neg_cost[:, gt_labels]
+        cls_cost = pos_cost - neg_cost
         return cls_cost * self.weight
 
     def _mask_focal_loss_cost(self, cls_pred, gt_labels) -> Tensor:

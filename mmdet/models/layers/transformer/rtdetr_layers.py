@@ -326,9 +326,9 @@ class RTDETRFPN(BaseModule):
             feature maps. Defaults to [256, 256, 256].
         out_channels (int, optional): The output dimension of the MLP.
             Defaults to 256.
+        num_csp_blocks (int): Number of bottlenecks in CSPLayer.
+            Defaults to 3.
         expansion (float, optional): The expansion of the CSPLayer.
-            Defaults to 1.0.
-        depth_mult (float, optional): The depth multiplier of the CSPLayer.
             Defaults to 1.0.
         upsample_cfg (dict): Config dict for interpolate layer.
             Default: `dict(scale_factor=2, mode='nearest')`
@@ -346,8 +346,8 @@ class RTDETRFPN(BaseModule):
         self,
         in_channels: List[int] = [256, 256, 256],
         out_channels: int = 256,
+        num_csp_blocks: int = 3,
         expansion: float = 1.0,
-        depth_mult: float = 1.0,
         upsample_cfg: ConfigType = dict(scale_factor=2, mode='nearest'),
         conv_cfg: OptConfigType = None,
         norm_cfg: OptConfigType = dict(type='BN', requires_grad=True),
@@ -363,7 +363,6 @@ class RTDETRFPN(BaseModule):
         super().__init__(init_cfg=init_cfg)
         self.in_channels = in_channels
         self.out_channels = out_channels
-        num_csp_blocks = round(3 * depth_mult)
 
         # top-down fpn
         self.upsample = nn.Upsample(**upsample_cfg)
@@ -606,7 +605,7 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
                 valid_ratios: Tensor, reg_branches: nn.ModuleList,
-                **kwargs) -> Tuple[Tensor]:
+                cls_branches: nn.ModuleList, **kwargs) -> Tuple[Tensor]:
         """Forward function of Transformer decoder.
 
         Args:
@@ -631,6 +630,8 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
                 levels, has shape (bs, num_levels, 2).
             reg_branches: (obj:`nn.ModuleList`): Used for refining the
                 regression results.
+            cls_branches: (obj:`nn.ModuleList`): Used for classification
+                results.
 
         Returns:
             tuple[Tensor]: Output queries and references of Transformer
@@ -650,16 +651,19 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
         assert self.return_intermediate
         assert reg_branches is not None
         assert reference_points.shape[-1] == 4
+        # To avoid inverse_sigmoid, remove .sigmoid() in pre_decoder
+        # So reference_points is unactivated reference_points
         unact_reference_points = reference_points
+        reference_points = unact_reference_points.sigmoid()
+
         eval_idx = kwargs.pop('eval_idx', -1)
         if eval_idx < 0:
             eval_idx = eval_idx + len(self.layers)
+            assert eval_idx >= 0
 
-        intermediate = []
-        intermediate_reference_points = []
+        all_layers_outputs_classes = []
+        all_layers_outputs_coords = []
         for lid, layer in enumerate(self.layers):
-            reference_points = unact_reference_points.sigmoid().detach()
-
             reference_points_input = reference_points[:, :, None]
             query_pos = self.ref_point_head(reference_points)
 
@@ -677,15 +681,15 @@ class RTDETRTransformerDecoder(DinoTransformerDecoder):
 
             tmp = reg_branches[lid](query)
 
-            intermediate.append(self.norm(query))
-
             if self.training or lid == eval_idx:
-                intermediate_reference_points.append(
+                all_layers_outputs_classes.append(cls_branches[lid](query))
+                all_layers_outputs_coords.append(
                     (tmp + unact_reference_points).sigmoid())
 
-            if lid == eval_idx:
-                break
+                if not self.training or lid == len(self.layers) - 1:
+                    break
 
             unact_reference_points = tmp + unact_reference_points.detach()
+            reference_points = unact_reference_points.sigmoid().detach()
 
-        return intermediate, intermediate_reference_points
+        return all_layers_outputs_classes, all_layers_outputs_coords

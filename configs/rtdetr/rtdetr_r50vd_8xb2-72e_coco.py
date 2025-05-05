@@ -30,7 +30,7 @@ model = dict(
         num_stages=4,
         out_indices=(1, 2, 3),
         frozen_stages=0,  # -1 for DINO
-        norm_cfg=dict(type='SyncBN', requires_grad=False),  # BN for DINO
+        norm_cfg=dict(type='BN', requires_grad=False),  # BN for DINO
         norm_eval=True,
         style='pytorch',
         init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
@@ -40,10 +40,10 @@ model = dict(
         kernel_size=1,
         out_channels=256,
         act_cfg=None,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),  # GN for DINO
+        norm_cfg=dict(type='BN', requires_grad=True),  # GN for DINO
         num_outs=3),  # 4 for DINO
     encoder=dict(
-        use_encoder_idx=[2],
+        use_encoder_idx=[-1],
         num_encoder_layers=1,
         in_channels=[256, 256, 256],
         fpn_cfg=dict(
@@ -51,7 +51,7 @@ model = dict(
             in_channels=[256, 256, 256],
             out_channels=256,
             expansion=1.0,
-            norm_cfg=dict(type='SyncBN', requires_grad=True)),
+            norm_cfg=dict(type='BN', requires_grad=True)),
         layer_cfg=dict(
             self_attn_cfg=dict(embed_dims=256, num_heads=8, dropout=0.0),
             ffn_cfg=dict(

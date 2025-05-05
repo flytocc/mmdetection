@@ -3,6 +3,8 @@ from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import torch
+from mmengine.dist import get_world_size
+from mmengine.logging import print_log
 from torch import Tensor, nn
 
 from mmdet.registry import MODELS
@@ -19,12 +21,16 @@ class RTDETR(DINO):
 
     Code is modified from the `official github repo
     <https://github.com/lyuwenyu/RT-DETR>`_.
+
+    Args:
+        use_syncbn (bool): Whether to use SyncBatchNorm. Defaults to True.
     """
 
     def __init__(self,
                  *args,
                  eval_idx: int = -1,
                  spatial_shapes: Optional[Tuple[Tuple[int, int]]] = None,
+                 use_syncbn: bool = True,
                  **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.eval_idx = eval_idx
@@ -38,6 +44,11 @@ class RTDETR(DINO):
                 'proposals_valid', proposals_valid, persistent=False)
         else:
             self.proposals, self.proposals_valid = None, None
+
+        # TODO: Waiting for mmengine support
+        if use_syncbn and get_world_size() > 1:
+            torch.nn.SyncBatchNorm.convert_sync_batchnorm(self)
+            print_log('Using SyncBatchNorm()', 'current')
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
@@ -190,8 +201,6 @@ class RTDETR(DINO):
         enc_outputs_class = self.bbox_head.cls_branches[
             self.decoder.num_layers](
                 output_memory)
-        enc_outputs_coord_unact = self.bbox_head.reg_branches[
-            self.decoder.num_layers](output_memory) + output_proposals
 
         # NOTE The DINO selects top-k proposals according to scores of
         # multi-class classification, while DeformDETR, where the input
@@ -199,22 +208,27 @@ class RTDETR(DINO):
         # binary classification.
         topk_indices = torch.topk(
             enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
-        topk_score = torch.gather(
-            enc_outputs_class, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
-        topk_coords_unact = torch.gather(
-            enc_outputs_coord_unact, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, 4))
-        topk_coords = topk_coords_unact.sigmoid()
-        topk_coords_unact = topk_coords_unact.detach()
 
         query = torch.gather(output_memory, 1,
                              topk_indices.unsqueeze(-1).repeat(1, 1, c))
+        topk_output_proposals = torch.gather(
+            output_proposals, 1,
+            topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+        topk_coords_unact = self.bbox_head.reg_branches[
+            self.decoder.num_layers](query) + topk_output_proposals
+
         if self.training:
+            topk_score = torch.gather(
+                enc_outputs_class, 1,
+                topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+            topk_coords = topk_coords_unact.sigmoid()
+            topk_coords_unact = topk_coords_unact.detach()
+
             dn_label_query, dn_bbox_query, dn_mask, dn_meta = \
                 self.dn_query_generator(batch_data_samples)
             query = query.detach()  # detach() is not used in DINO
             query = torch.cat([dn_label_query, query], dim=1)
+            dn_bbox_query = dn_bbox_query.type_as(topk_coords_unact)
             reference_points = torch.cat([dn_bbox_query, topk_coords_unact],
                                          dim=1)
         else:
@@ -227,6 +241,7 @@ class RTDETR(DINO):
             memory=memory,
             reference_points=reference_points,
             dn_mask=dn_mask,
+            cls_branches=self.bbox_head.cls_branches,
             eval_idx=self.eval_idx)
         # NOTE DINO calculates encoder losses on scores and coordinates
         # of selected top-k encoder queries, while DeformDETR is of all
@@ -262,7 +277,8 @@ class RTDETR(DINO):
     @lru_cache
     def gen_proposals(spatial_shapes: Tuple[Tuple[int, int]],
                       batch_size: int = 1,
-                      device: Optional[str] = None) -> Tuple[Tensor, Tensor]:
+                      device: Optional[str] = None,
+                      dtype: torch.dtype = torch.float32) -> Tuple[Tensor, Tensor]:
         proposals = []
         for lvl, HW in enumerate(spatial_shapes):
             H, W = HW
@@ -289,4 +305,4 @@ class RTDETR(DINO):
         output_proposals = output_proposals.masked_fill(
             ~output_proposals_valid, float('inf'))
 
-        return output_proposals, output_proposals_valid.float()
+        return output_proposals.to(dtype), output_proposals_valid.to(dtype)
